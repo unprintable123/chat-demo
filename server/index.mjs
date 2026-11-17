@@ -653,7 +653,8 @@ const serveStatic = async (req, res, url) => {
   } catch {
     throw new HttpError(400, 'Invalid path')
   }
-  const requested = pathname === '/' ? '/index.html' : pathname
+  const requested =
+    pathname === '/' || /^\/chat\/[^/]+\/?$/.test(pathname) ? '/index.html' : pathname
   const target = path.resolve(DIST_DIR, `.${requested}`)
   if (target !== DIST_DIR && !target.startsWith(`${DIST_DIR}${path.sep}`)) {
     throw new HttpError(403, 'Forbidden')

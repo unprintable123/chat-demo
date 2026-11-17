@@ -35,6 +35,7 @@ import {
   type SessionSummary,
   type UserMessage,
 } from './types.js'
+import { getChatIdFromUrl, updateChatUrl } from './url.js'
 
 /** deepseek-flash 同时支持深度思考与图片输入 */
 const MODEL: ChatModel = 'deepseek-flash'
@@ -328,7 +329,18 @@ export const initChat = (): Promise<void> => {
     try {
       const summaries = await db.loadSessionSummaries()
       if (epoch === historyEpoch) {
-        set({ ready: true, sessions: sortSessions(summaries) })
+        const routedId = getChatIdFromUrl()
+        const activeId =
+          routedId !== null && summaries.some((session) => session.id === routedId)
+            ? routedId
+            : null
+        set({ ready: true, sessions: sortSessions(summaries), activeId })
+        if (activeId !== null) {
+          touchSession(activeId)
+          void ensureSessionLoaded(activeId)
+        } else if (routedId !== null) {
+          updateChatUrl(null, 'replace')
+        }
       }
     } catch (error) {
       if (epoch === historyEpoch) {
@@ -453,6 +465,7 @@ export const replaceHistory = async (write: () => Promise<void>): Promise<number
       sessionSaveErrors: {},
       activeId: null,
     })
+    updateChatUrl(null, 'replace')
     return summaries.length
   } finally {
     set({ importingHistory: false })
@@ -467,20 +480,52 @@ export const replaceHistory = async (write: () => Promise<void>): Promise<number
   }
 }
 
-export const newChat = () => {
-  if (!get().importingHistory) {
-    set({ activeId: null })
-    trimSessionCache()
+type ChatNavigation = 'push' | 'replace' | 'none'
+
+const activateChat = (id: string | null, navigation: ChatNavigation): boolean => {
+  if (get().importingHistory) {
+    return false
   }
+  if (id !== null && !get().sessions.some((session) => session.id === id)) {
+    return false
+  }
+  if (navigation !== 'none') {
+    updateChatUrl(id, navigation)
+  }
+  set({ activeId: id })
+  if (id !== null) {
+    touchSession(id)
+    void ensureSessionLoaded(id)
+  }
+  trimSessionCache()
+  return true
+}
+
+export const newChat = () => {
+  activateChat(null, 'push')
 }
 
 export const selectSession = (id: string) => {
-  if (!get().importingHistory && get().sessions.some((session) => session.id === id)) {
-    touchSession(id)
-    set({ activeId: id })
-    void ensureSessionLoaded(id)
-    trimSessionCache()
+  activateChat(id, 'push')
+}
+
+/** 浏览器前进/后退只恢复状态，不再生成新的历史记录。 */
+export const bindChatNavigation = () => {
+  const onPopState = () => {
+    if (!get().ready || get().importingHistory) {
+      return
+    }
+    const id = getChatIdFromUrl()
+    if (id !== null && activateChat(id, 'none')) {
+      return
+    }
+    activateChat(null, 'none')
+    if (id !== null) {
+      updateChatUrl(null, 'replace')
+    }
   }
+  window.addEventListener('popstate', onPopState)
+  return () => window.removeEventListener('popstate', onPopState)
 }
 
 export const renameSession = (id: string, title: string) => {
@@ -536,6 +581,7 @@ const removeSessionData = async (id: string): Promise<boolean> => {
     unsavedSessions.delete(id)
     pendingFiles.delete(id)
     clearDraft(id)
+    const wasActive = get().activeId === id
     set((state) => ({
       sessions: state.sessions.filter((session) => session.id !== id),
       sessionCache: Object.fromEntries(
@@ -549,6 +595,9 @@ const removeSessionData = async (id: string): Promise<boolean> => {
       ),
       activeId: state.activeId === id ? null : state.activeId,
     }))
+    if (wasActive) {
+      updateChatUrl(null, 'replace')
+    }
     return true
   } catch (error) {
     db.reportStorageError('delete session')(error)
@@ -605,6 +654,7 @@ export const sendMessage = (targetSessionId: string | null) => {
       sessionCache: { ...state.sessionCache, [session.id]: session },
       activeId: session.id,
     }))
+    updateChatUrl(session.id, 'replace')
   }
   const current = getSession(sessionId)
   if (!current) {
