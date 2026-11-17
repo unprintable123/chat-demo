@@ -1,9 +1,30 @@
-import { toSessionSummary, type Session, type SessionSummary } from './types.js'
+import {
+  toSessionSummary,
+  type FileAttachment,
+  type Session,
+  type SessionSummary,
+} from './types.js'
 
 /** Original attachments are persisted by the server, not IndexedDB. */
 export type StoredFile = {
   id: string
   blob: Blob
+}
+
+export type CachedDocumentPart = {
+  id: string
+  name: string
+  label: string
+  startPage: number
+  endPage: number
+  size: number
+  serverId: string
+}
+
+export type CachedDocumentResult = {
+  key: string
+  cached: boolean
+  parts: CachedDocumentPart[]
 }
 
 const errorFrom = async (response: Response): Promise<Error> => {
@@ -168,6 +189,71 @@ export const loadFile = async (id: string): Promise<Blob | undefined> => {
   }
   return response.blob()
 }
+
+export const saveDocumentCacheFile = async (file: StoredFile): Promise<void> => {
+  const response = await fetch(`/api/chat/document-cache/files/${encodeURIComponent(file.id)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': file.blob.type || 'application/octet-stream',
+    },
+    body: file.blob,
+  })
+  if (!response.ok) {
+    throw await errorFrom(response)
+  }
+}
+
+export const loadDocumentCacheFile = async (id: string): Promise<Blob | undefined> => {
+  const response = await fetch(`/api/chat/document-cache/files/${encodeURIComponent(id)}`)
+  if (response.status === 404) {
+    return undefined
+  }
+  if (!response.ok) {
+    throw await errorFrom(response)
+  }
+  return response.blob()
+}
+
+export const loadDocumentCache = async <T>(key: string): Promise<T | undefined> => {
+  const response = await fetch(`/api/chat/document-cache/${encodeURIComponent(key)}`)
+  if (response.status === 404) {
+    return undefined
+  }
+  if (!response.ok) {
+    throw await errorFrom(response)
+  }
+  return (await response.json()) as T
+}
+
+export const saveDocumentCache = async <T>(key: string, value: T): Promise<void> => {
+  await request<undefined>(`/api/chat/document-cache/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(value),
+  })
+}
+
+export const prepareDocumentCache = async (
+  files: FileAttachment[],
+  inputTokens: number | undefined,
+  maxTokens: number,
+  signal?: AbortSignal
+): Promise<CachedDocumentResult> =>
+  request<CachedDocumentResult>('/api/chat/document-cache/split', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: files.map(({ id, serverId, name, size }) => ({
+        id,
+        serverId,
+        name,
+        size,
+      })),
+      inputTokens,
+      maxTokens,
+    }),
+    signal,
+  })
 
 export const clearStaging = async (): Promise<void> => {
   await request<undefined>('/api/chat/staging', { method: 'DELETE' })

@@ -13,6 +13,7 @@ const CONFIG_PATH = path.join(DATA_DIR, 'config.json')
 const CHAT_DIR = path.join(DATA_DIR, 'chat')
 const STAGING_DIR = path.join(DATA_DIR, 'chat-staging')
 const PREVIOUS_DIR = path.join(DATA_DIR, 'chat-previous')
+const DOCUMENT_CACHE_DIR = path.join(DATA_DIR, 'document-cache')
 const UPSTREAM_ORIGIN = `${(process.env.DEEPSEEK_API_ORIGIN || 'https://api.deepseek.com').replace(/\/+$/, '')}/`
 const HOST = process.env.HOST || '127.0.0.1'
 const PORT = Number(process.env.PORT || 8091)
@@ -96,6 +97,7 @@ const ensureStorage = async () => {
   await mkdir(path.join(CHAT_DIR, 'files'), { recursive: true })
   await mkdir(path.join(STAGING_DIR, 'sessions'), { recursive: true })
   await mkdir(path.join(STAGING_DIR, 'files'), { recursive: true })
+  await mkdir(path.join(DOCUMENT_CACHE_DIR, 'files'), { recursive: true })
 }
 
 let storageReady
@@ -171,6 +173,7 @@ const sendError = (res, error) => {
 
 const sessionFile = (base, id) => path.join(base, 'sessions', `${resourceFileName(id)}.json`)
 const chatFile = (id) => path.join(CHAT_DIR, 'files', resourceFileName(id))
+const documentCacheFile = (id) => path.join(DOCUMENT_CACHE_DIR, `${resourceFileName(id)}.json`)
 
 const validateSession = (session, expectedId) => {
   if (
@@ -373,6 +376,7 @@ const saveApiKey = async (apiKey) => {
 const proxyAllowed = (pathname) =>
   pathname === '/models' ||
   pathname === '/v1/tools/asr' ||
+  pathname === '/v1/tools/ocr' ||
   pathname === '/v1/tools/tts' ||
   pathname === '/anthropic/v1/messages' ||
   /^\/anthropic\/v1\/files(?:\/[^/]+)?$/.test(pathname)
@@ -455,6 +459,173 @@ const proxyDeepSeek = async (req, res, url) => {
     }
   })
   bodyStream.pipe(res)
+}
+
+const uploadDocumentPart = async (bytes, name) => {
+  const apiKey = await currentApiKey()
+  if (!apiKey) {
+    throw new HttpError(401, 'API key is not configured')
+  }
+  const form = new FormData()
+  form.append('purpose', 'rich_layout_recognition')
+  form.append('file', new Blob([bytes], { type: 'application/pdf' }), name)
+  const response = await fetch(new URL('anthropic/v1/files', UPSTREAM_ORIGIN), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'x-api-key': apiKey,
+      'anthropic-beta': 'files-api-2025-04-14',
+    },
+    body: form,
+  })
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    let message = text || response.statusText || 'Document part upload failed'
+    try {
+      const body = JSON.parse(text)
+      if (typeof body?.error?.message === 'string') {
+        message = body.error.message
+      }
+    } catch {
+      // Keep the original response text.
+    }
+    throw new HttpError(response.status, message)
+  }
+  const uploaded = await response.json()
+  if (typeof uploaded?.id !== 'string') {
+    throw new HttpError(502, 'Invalid document upload response')
+  }
+  return uploaded.id
+}
+
+const mapWithConcurrency = async (items, limit, run) => {
+  const results = new Array(items.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++
+      results[index] = await run(items[index], index)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
+const documentCacheKey = (files, maxTokens) => {
+  const source = files
+    .map((file) => `${file.id}:${file.serverId ?? ''}:${file.name}:${file.size}`)
+    .join('|')
+  const signature = `${source}:${maxTokens}`
+  let hash = 0xcbf29ce484222325n
+  for (const byte of Buffer.from(signature, 'utf8')) {
+    hash ^= BigInt(byte)
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
+  }
+  return { key: hash.toString(16).padStart(16, '0'), signature }
+}
+
+const prepareDocumentCache = async (body) => {
+  if (!Array.isArray(body?.files) || body.files.length === 0) {
+    throw new HttpError(400, 'Invalid document cache request')
+  }
+  const files = body.files.map((file) => {
+    if (
+      !isResourceId(file?.id) ||
+      typeof file.name !== 'string' ||
+      !file.name.toLowerCase().endsWith('.pdf') ||
+      typeof file.size !== 'number'
+    ) {
+      throw new HttpError(400, 'Invalid PDF attachment')
+    }
+    return file
+  })
+  const maxTokens = Number(body.maxTokens || 32_768)
+  const inputTokens = Number(body.inputTokens || maxTokens * 2)
+  if (!Number.isFinite(maxTokens) || maxTokens < 1_000) {
+    throw new HttpError(400, 'Invalid token limit')
+  }
+  const { key, signature } = documentCacheKey(files, maxTokens)
+  const cached = await readJson(documentCacheFile(key), undefined)
+  if (
+    cached?.version === 1 &&
+    cached.source === signature &&
+    cached.maxTokens === maxTokens &&
+    Array.isArray(cached.parts) &&
+    cached.parts.length >= 2 &&
+    cached.parts.every((part) => typeof part.serverId === 'string' && part.serverId)
+  ) {
+    return { key, cached: true, parts: cached.parts }
+  }
+
+  const { PDFDocument } = await import('pdf-lib')
+  const targetTokens = Math.max(4_000, Math.floor(maxTokens * 0.72))
+  const totalChunks = Math.min(12, Math.max(2, Math.ceil(inputTokens / targetTokens)))
+  const descriptors = []
+  for (const file of files) {
+    const sourcePath = path.join(CHAT_DIR, 'files', resourceFileName(file.id))
+    const bytes = await readFile(sourcePath)
+    const source = await PDFDocument.load(bytes)
+    const pageCount = source.getPageCount()
+    if (pageCount <= 1) {
+      throw new HttpError(400, 'PDF is too small to split')
+    }
+    const chunksForFile = Math.max(2, Math.ceil(totalChunks / files.length))
+    const pagesPerChunk = Math.ceil(pageCount / chunksForFile)
+    for (let start = 0, index = 0; start < pageCount; start += pagesPerChunk, index++) {
+      const end = Math.min(start + pagesPerChunk, pageCount)
+      const chunk = await PDFDocument.create()
+      const pages = await chunk.copyPages(
+        source,
+        Array.from({ length: end - start }, (_, offset) => start + offset)
+      )
+      for (const page of pages) {
+        chunk.addPage(page)
+      }
+      const data = await chunk.save()
+      descriptors.push({
+        id: randomUUID(),
+        name: `${file.name.replace(/\.pdf$/i, '')}-part-${index + 1}.pdf`,
+        label: `《${file.name}》第 ${start + 1}-${end} 页`,
+        startPage: start + 1,
+        endPage: end,
+        size: data.length,
+        bytes: data,
+      })
+    }
+  }
+  if (descriptors.length < 2 || descriptors.length > 12) {
+    throw new HttpError(400, 'Unable to create reusable PDF chunks')
+  }
+
+  await Promise.all(
+    descriptors.map(async (part) => {
+      const target = path.join(DOCUMENT_CACHE_DIR, 'files', resourceFileName(part.id))
+      const temp = `${target}.${process.pid}.${randomUUID()}.tmp`
+      await writeFile(temp, part.bytes, { mode: 0o600 })
+      await rename(temp, target)
+      await writeJsonAtomic(`${target}.json`, {
+        type: 'application/pdf',
+        size: part.bytes.length,
+      })
+    })
+  )
+  const uploaded = await mapWithConcurrency(descriptors, 3, async (part) => ({
+    ...part,
+    serverId: await uploadDocumentPart(part.bytes, part.name),
+  }))
+  const parts = uploaded.map(({ bytes: _bytes, ...part }) => part)
+  const now = Date.now()
+  await withLock('document-cache', () =>
+    writeJsonAtomic(documentCacheFile(key), {
+      version: 1,
+      source: signature,
+      maxTokens,
+      createdAt: now,
+      updatedAt: now,
+      parts,
+    })
+  )
+  return { key, cached: false, parts }
 }
 
 const MIME_TYPES = {
@@ -550,8 +721,71 @@ const handleChat = async (req, res, url) => {
     sendJson(res, 200, summaries)
     return true
   }
+  if (req.method === 'POST' && pathname === '/api/chat/document-cache/split') {
+    const result = await prepareDocumentCache(await readJsonBody(req))
+    sendJson(res, 200, result)
+    return true
+  }
 
-  let match = /^\/api\/chat\/staging\/files\/([^/]+)$/.exec(pathname)
+  let match = /^\/api\/chat\/document-cache\/files\/([^/]+)$/.exec(pathname)
+  if (match && req.method === 'PUT') {
+    const id = safeId(match[1])
+    await writeAttachment(DOCUMENT_CACHE_DIR, id, req)
+    res.writeHead(204)
+    res.end()
+    return true
+  }
+  if (match && (req.method === 'GET' || req.method === 'HEAD')) {
+    const id = safeId(match[1])
+    const target = path.join(DOCUMENT_CACHE_DIR, 'files', resourceFileName(id))
+    let info
+    try {
+      info = await stat(target)
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        throw new HttpError(404, 'Cached document part not found')
+      }
+      throw error
+    }
+    const meta = await readJson(`${target}.json`, {})
+    res.writeHead(200, {
+      'Content-Type':
+        typeof meta.type === 'string' && meta.type ? meta.type : 'application/octet-stream',
+      'Content-Length': info.size,
+      'Cache-Control': 'private, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+    })
+    if (req.method === 'HEAD') {
+      res.end()
+    } else {
+      createReadStream(target).pipe(res)
+    }
+    return true
+  }
+
+  match = /^\/api\/chat\/document-cache\/([^/]+)$/.exec(pathname)
+  if (match && req.method === 'GET') {
+    const id = safeId(match[1])
+    const cache = await readJson(documentCacheFile(id), undefined)
+    if (!cache) {
+      throw new HttpError(404, 'Document cache not found')
+    }
+    sendJson(res, 200, cache)
+    return true
+  }
+  if (match && req.method === 'PUT') {
+    const id = safeId(match[1])
+    const cache = await readJsonBody(req)
+    if (!cache || typeof cache !== 'object' || !Array.isArray(cache.parts)) {
+      throw new HttpError(400, 'Invalid document cache')
+    }
+    await withLock('document-cache', () => writeJsonAtomic(documentCacheFile(id), cache))
+    res.writeHead(204)
+    res.end()
+    return true
+  }
+
+  match = /^\/api\/chat\/staging\/files\/([^/]+)$/.exec(pathname)
   if (match && req.method === 'PUT') {
     const id = safeId(match[1])
     await writeAttachment(STAGING_DIR, id, req)

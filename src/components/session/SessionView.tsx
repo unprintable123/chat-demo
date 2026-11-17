@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import { useIsMobile } from '../../app/viewport.js'
 import { useTranslate } from '../../i18n/index.js'
 import type { Session } from '../../services/chat/types.js'
+import { getCurrentContextUsage } from '../../services/chat/branches.js'
 import { ChatInput } from '../chatInput/ChatInput.js'
 import { MessageList } from '../messages/MessageList.js'
 import { MobileHeader } from './MobileHeader.js'
@@ -20,6 +21,7 @@ export const SessionView = ({
   const t = useTranslate()
   const isMobile = useIsMobile()
   const title = session.title || t('untitledChat')
+  const contextUsage = getCurrentContextUsage(session)
   return (
     <div className={styles.view}>
       {isMobile ? (
@@ -36,7 +38,7 @@ export const SessionView = ({
         streaming={streaming}
         footer={
           <div className={styles.inputContainer}>
-            <ChatInput sessionId={session.id} />
+            <ChatInput sessionId={session.id} contextUsage={contextUsage} />
             <div className={styles.caveat}>{t('contentCaveat')}</div>
           </div>
         }

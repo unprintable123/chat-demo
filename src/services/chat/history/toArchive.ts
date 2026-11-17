@@ -30,7 +30,7 @@ const userFragments = (message: UserMessage, exportImage: ExportImage): Fragment
       id: file.id,
       file_name: file.name,
       file_size: file.size,
-      token_usage: null,
+      token_usage: file.tokenUsage ?? null,
       inserted_at: iso(message.createdAt),
       export_path: exportImage({ id: file.id, name: file.name, isImage }),
       is_image: isImage,
@@ -197,14 +197,16 @@ const replyStatus = ({ status, stopReason }: AssistantMessage): ChatMessageStatu
   }
 }
 
-/** 最近一次请求的输入（含缓存）与输出之和，即这一条结束时的上下文 token。 */
-const contextTokens = ({ usage }: AssistantMessage) =>
-  usage
+/** 最近一次请求的输入（含缓存）、附件与输出之和，即这一条结束时的上下文 token。 */
+const contextTokens = ({ usage, contextTokens, attachmentTokens }: AssistantMessage) =>
+  contextTokens ??
+  (usage
     ? usage.input_tokens +
       usage.cache_creation_input_tokens +
       usage.cache_read_input_tokens +
-      usage.output_tokens
-    : 0
+      usage.output_tokens +
+      (attachmentTokens ?? 0)
+    : 0)
 
 /** 消息按父节点优先重新编号为 1…n，保证 parent_id 小于 id。 */
 const numberMessages = (messages: Message[]) => {

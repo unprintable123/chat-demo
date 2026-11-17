@@ -1,4 +1,10 @@
-import type { Message, Session } from './types.js'
+import {
+  estimateContextTokens,
+  estimateFileContextTokens,
+  getContextRounds,
+  toRequestMessages,
+} from './reply.js'
+import type { ContextTokenUsage, Message, Session } from './types.js'
 
 /** 将线性消息列表规范化为单分支，保留消息 ID、内容及时间。 */
 export const normalizeSession = (session: Session): Session =>
@@ -33,6 +39,72 @@ export const getVisibleMessages = (session: Session): Message[] => {
   }
   return path
 }
+
+/** 当前分支最近一次请求的 token 明细。 */
+export const getCurrentContextUsage = (session: Session): ContextTokenUsage | undefined => {
+  const messages = getVisibleMessages(session)
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message.role !== 'assistant') {
+      continue
+    }
+    const history = messages.slice(0, Math.max(0, index - 1))
+    const question = messages[index - 1]
+    const files = [
+      ...getContextRounds(history).flatMap(([user]) => user.files),
+      ...(question?.role === 'user' ? question.files : []),
+    ].filter((file) => file.serverId !== null || file.tokenUsage !== undefined)
+    const estimatedFileTokens = estimateFileContextTokens(files)
+    if (message.contextTokens !== undefined) {
+      return {
+        fileTokens: estimatedFileTokens,
+        totalTokens: message.contextTokens,
+      }
+    }
+    if (message.usage) {
+      const { input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens } =
+        message.usage
+      const apiInputTokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+      const storedFileTokens = message.attachmentTokens
+      const attachmentTokensInUsage =
+        message.attachmentTokensInUsage ?? (storedFileTokens === undefined || storedFileTokens > 0)
+      let fileTokens = storedFileTokens || estimatedFileTokens
+      if (attachmentTokensInUsage && question?.role === 'user' && estimatedFileTokens > 0) {
+        const requestEstimate = estimateContextTokens(
+          toRequestMessages(
+            history,
+            question,
+            undefined,
+            message.thinking ?? false,
+            message.latestReminder
+          )
+        )
+        const nonFileEstimate = Math.max(0, requestEstimate - estimatedFileTokens)
+        fileTokens = Math.max(fileTokens, apiInputTokens - nonFileEstimate)
+      }
+      fileTokens = Math.min(
+        attachmentTokensInUsage ? apiInputTokens : Number.POSITIVE_INFINITY,
+        fileTokens
+      )
+      const inputTokens = attachmentTokensInUsage
+        ? Math.max(0, apiInputTokens - fileTokens)
+        : apiInputTokens
+      return {
+        fileTokens,
+        inputTokens,
+        outputTokens: output_tokens,
+        totalTokens: attachmentTokensInUsage
+          ? apiInputTokens + output_tokens
+          : inputTokens + fileTokens + output_tokens,
+      }
+    }
+  }
+  return undefined
+}
+
+/** 当前分支最近一次请求的上下文 token 总数。 */
+export const getCurrentContextTokens = (session: Session): number | undefined =>
+  getCurrentContextUsage(session)?.totalTokens
 
 export type MessageVersions = { ids: string[]; index: number }
 

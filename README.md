@@ -33,6 +33,7 @@ Open http://127.0.0.1:8091. Set `HOST=0.0.0.0` only when you intentionally want 
 - Multiple conversations with automatic titles, renaming, and deletion; edit prompts, regenerate replies, and switch between message branches.
 - Streaming replies, deep thinking, smart search, link reading, and source citations; stop generation or continue eligible replies.
 - Upload, paste, or drag and drop attachments; use voice input and read replies aloud. A live audio spectrum appears in the first row of the input area while recording on mobile.
+- PDFs that exceed the active input limit are split and cached on the server, with parallel chunk analysis; other long documents fall back to page-by-page OCR.
 - Markdown, syntax highlighting, KaTeX math, and Mermaid diagrams.
 - Simplified Chinese and English, light and dark themes, mobile layouts, location settings, and chat history import and export.
 

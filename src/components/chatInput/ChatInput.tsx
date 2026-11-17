@@ -1,6 +1,7 @@
 import clsx from 'clsx'
 import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import {
+  IconContextOutline14,
   IconGlobeLanguageOutline14,
   IconPaperclipOutline16,
   IconSendOutline16,
@@ -32,15 +33,39 @@ import { useVoiceInput } from './useVoiceInput.js'
 import { VoiceButton } from './VoiceButton.js'
 import { Spectrum } from './Spectrum.js'
 import { useTranslate } from '../../i18n/index.js'
+import type { ContextTokenUsage } from '../../services/chat/types.js'
 import styles from './ChatInput.module.css'
 
 /** 输入框：自适应高度的文本框 + 文件 + 深度思考与智能搜索开关 + 语音输入 + 发送 / 停止 */
-export const ChatInput = memo(function ChatInput({ sessionId }: { sessionId: string | null }) {
+export const ChatInput = memo(function ChatInput({
+  sessionId,
+  contextUsage,
+}: {
+  sessionId: string | null
+  contextUsage?: ContextTokenUsage
+}) {
   // 切换目标时释放录音、转写和 DOM 状态；文字与附件由草稿服务保留。
-  return <Input key={sessionId === null ? 'new' : `session:${sessionId}`} sessionId={sessionId} />
+  return (
+    <Input
+      key={sessionId === null ? 'new' : `session:${sessionId}`}
+      sessionId={sessionId}
+      contextUsage={contextUsage}
+    />
+  )
 })
 
-const Input = ({ sessionId }: { sessionId: string | null }) => {
+const formatContextK = (tokens: number) => {
+  const value = tokens / 1000
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)}K`
+}
+
+const Input = ({
+  sessionId,
+  contextUsage,
+}: {
+  sessionId: string | null
+  contextUsage?: ContextTokenUsage
+}) => {
   const t = useTranslate()
   const draft = useDrafts((state) => state.drafts.get(sessionId) ?? EMPTY_DRAFT)
   const { text, attachments } = draft
@@ -56,6 +81,26 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const togglesRef = useRef<HTMLDivElement>(null)
+  const formatTokens = (tokens: number | undefined) =>
+    tokens === undefined ? '—' : tokens.toLocaleString()
+  const contextTooltip =
+    contextUsage === undefined
+      ? ''
+      : [
+          `${t('contextUsageFiles')}: ${formatTokens(contextUsage.fileTokens)}`,
+          `${t('contextUsageInput')}: ${formatTokens(contextUsage.inputTokens)}`,
+          `${t('contextUsageOutput')}: ${formatTokens(contextUsage.outputTokens)}`,
+          `${t('contextUsageTotal')}: ${formatTokens(contextUsage.totalTokens)}`,
+        ].join('\n')
+  const contextRows =
+    contextUsage === undefined
+      ? []
+      : [
+          { label: t('contextUsageFiles'), tokens: contextUsage.fileTokens },
+          { label: t('contextUsageInput'), tokens: contextUsage.inputTokens },
+          { label: t('contextUsageOutput'), tokens: contextUsage.outputTokens },
+          { label: t('contextUsageTotal'), tokens: contextUsage.totalTokens, total: true },
+        ]
 
   useLayoutEffect(() => {
     const toggles = togglesRef.current
@@ -228,6 +273,33 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
           </Tooltip>
         </div>
         <div className={styles.right}>
+          {contextUsage === undefined ? null : (
+            <Tooltip
+              content={
+                <div className={styles.contextUsageTooltip}>
+                  {contextRows.map((row) => (
+                    <div
+                      key={row.label}
+                      className={clsx(
+                        styles.contextUsageRow,
+                        row.total && styles.contextUsageTotal
+                      )}
+                    >
+                      <span>{row.label}</span>
+                      <span>{formatTokens(row.tokens)}</span>
+                    </div>
+                  ))}
+                </div>
+              }
+            >
+              <span className={styles.contextUsage} aria-label={contextTooltip}>
+                <span className={styles.contextUsageIcon}>
+                  <IconContextOutline14 />
+                </span>
+                <span>{formatContextK(contextUsage.totalTokens)}</span>
+              </span>
+            </Tooltip>
+          )}
           <VoiceButton
             status={voice.status}
             disabled={!voice.available}

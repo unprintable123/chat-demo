@@ -18,9 +18,13 @@ import type {
 /** deepseek-flash 的 1M 上下文扣除思考/输出与估算误差后的输入预算。 */
 export const INPUT_TOKEN_BUDGET = 900_000
 /** 历史文档/图片的实际 token 数无法在浏览器中准确计算，按保守值参与预算。 */
-const FILE_CONTEXT_TOKEN_ESTIMATE = 8_192
+export const FILE_CONTEXT_TOKEN_ESTIMATE = 8_192
 
-const estimateTextTokens = (text: string): number => {
+/** 附件优先使用归档中的精确 token，否则按保守值估算。 */
+export const estimateFileContextTokens = (files: FileAttachment[]): number =>
+  files.reduce((total, file) => total + (file.tokenUsage ?? FILE_CONTEXT_TOKEN_ESTIMATE), 0)
+
+export const estimateTextTokens = (text: string): number => {
   let wide = 0
   let ascii = 0
   for (const character of text) {
@@ -51,7 +55,7 @@ const estimateMessageTokens = (message: MessageParam): number => {
   )
 }
 
-const estimateContextTokens = (messages: MessageParam[]): number =>
+export const estimateContextTokens = (messages: MessageParam[]): number =>
   messages.reduce((total, message) => total + estimateMessageTokens(message), 0)
 
 /**

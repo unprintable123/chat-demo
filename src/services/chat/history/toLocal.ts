@@ -38,6 +38,7 @@ const toFile = (file: FileEntry): FileAttachment => ({
   serverId: null,
   name: file.file_name,
   size: file.file_size,
+  ...(file.token_usage === null ? {} : { tokenUsage: file.token_usage }),
   isImage: file.is_image,
   // 图片身份来自归档；原件随后从 ZIP 读取后补充具体 MIME。
   mimeType: '',
@@ -229,6 +230,9 @@ const toAssistant = (message: ChatMessage): AssistantMessage => {
     search: message.search_enabled,
     prefix: false,
     status: replyStatus[message.status],
+    ...(message.accumulated_token_usage > 0
+      ? { contextTokens: message.accumulated_token_usage }
+      : {}),
     // 拒绝回复丢弃模型正文和思考，保留模板提示与工具步骤。
     ...(refused ? { stopReason: 'refusal' as const } : {}),
     blocks: refused

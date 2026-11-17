@@ -7,6 +7,7 @@ import { cancelUpload, describeUploadError, uploadAttachment, useUploads } from 
 import { useSettings } from '../settings.js'
 import { appendBranch, getVisibleMessages, normalizeSession, selectVersion } from './branches.js'
 import * as db from './db.js'
+import { prepareDocumentFallback } from './documentFallback.js'
 import {
   clearAllDrafts,
   clearDraft,
@@ -18,6 +19,8 @@ import { createLatestReminder } from './latestReminder.js'
 import {
   applyEvent,
   canContinueReply,
+  estimateFileContextTokens,
+  estimateContextTokens,
   getContextRounds,
   INPUT_TOKEN_BUDGET,
   settleReply,
@@ -54,13 +57,19 @@ const isContextTooLongError = (error: unknown) =>
     error.message
   )
 
-const contextLimitFromError = (error: unknown) => {
+const contextOverflowFromError = (error: unknown) => {
   if (!(error instanceof ApiError)) {
     return undefined
   }
-  const match = /exceeds max\s+(\d+)\s+tokens?/i.exec(error.message)
-  const limit = match ? Number(match[1]) : NaN
-  return Number.isFinite(limit) && limit > 0 ? limit : undefined
+  const match = /user input too long,\s*(\d+)\s+tokens exceeds max\s+(\d+)\s+tokens?/i.exec(
+    error.message
+  )
+  if (!match) {
+    return undefined
+  }
+  const inputTokens = Number(match[1])
+  const maxTokens = Number(match[2])
+  return inputTokens > 0 && maxTokens > 0 ? { inputTokens, maxTokens } : undefined
 }
 
 /** 阅读链接始终开启，智能搜索开关控制是否另行声明搜索工具（含边想边搜）。 */
@@ -986,6 +995,9 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
   let frame = 0
   let contextTokenBudget = INPUT_TOKEN_BUDGET
   let contextRetried = false
+  let documentFallbackTried = false
+  let fallbackInProgress = false
+  let nonFileTokenEstimate = 0
   const flush = () => {
     cancelAnimationFrame(frame)
     frame = 0
@@ -1005,9 +1017,18 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         const latestReminder = prepared.prefix
           ? prepared.prefix.latestReminder
           : createLatestReminder(useSettings.getState())
-        reply = { ...reply, latestReminder }
-        updateReply(sessionId, reply)
-        persist(sessionId)
+        const requestFiles = [
+          ...getContextRounds(prepared.history).flatMap(([user]) => user.files),
+          ...prepared.question.files,
+        ].filter((file) => file.serverId !== null)
+        const previousAttachmentTokens = Math.max(
+          0,
+          ...getContextRounds(prepared.history).map(([, reply]) => reply.attachmentTokens ?? 0)
+        )
+        const attachmentTokens =
+          requestFiles.length > 0
+            ? Math.max(estimateFileContextTokens(requestFiles), previousAttachmentTokens)
+            : 0
         const messages = toRequestMessages(
           prepared.history,
           prepared.question,
@@ -1016,6 +1037,21 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           latestReminder,
           contextTokenBudget
         )
+        nonFileTokenEstimate = Math.max(
+          0,
+          estimateContextTokens(messages) - estimateFileContextTokens(requestFiles)
+        )
+        reply = {
+          ...reply,
+          latestReminder,
+          contextTokens: undefined,
+          attachmentTokens: fallbackInProgress
+            ? Math.max(reply.attachmentTokens ?? 0, attachmentTokens)
+            : attachmentTokens,
+          attachmentTokensInUsage: fallbackInProgress ? false : requestFiles.length > 0,
+        }
+        updateReply(sessionId, reply)
+        persist(sessionId)
         const events = streamMessage(
           {
             model: initial.model ?? MODEL,
@@ -1044,6 +1080,20 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
             titleRequests.delete(controller)
           }
           reply = applyEvent(reply, event, Date.now(), blockIndexes)
+          if (!fallbackInProgress && requestFiles.length > 0 && reply.usage) {
+            const apiInputTokens =
+              reply.usage.input_tokens +
+              reply.usage.cache_creation_input_tokens +
+              reply.usage.cache_read_input_tokens
+            const inferredAttachmentTokens = Math.max(
+              reply.attachmentTokens ?? 0,
+              apiInputTokens - nonFileTokenEstimate
+            )
+            reply = {
+              ...reply,
+              attachmentTokens: Math.min(apiInputTokens, inferredAttachmentTokens),
+            }
+          }
           if (document.visibilityState === 'hidden') {
             flush()
           } else {
@@ -1066,12 +1116,50 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           })
           break
         }
+        if (!receivedContent && !documentFallbackTried && isContextTooLongError(error)) {
+          documentFallbackTried = true
+          const overflow = contextOverflowFromError(error)
+          if (overflow) {
+            reply = {
+              ...reply,
+              attachmentTokens: Math.max(
+                reply.attachmentTokens ?? 0,
+                overflow.inputTokens - nonFileTokenEstimate
+              ),
+            }
+          }
+          try {
+            const fallbackQuestion = await prepareDocumentFallback(
+              request.question,
+              initial.model,
+              overflow ?? {},
+              controller.signal
+            )
+            if (fallbackQuestion) {
+              request = { history: [], question: fallbackQuestion }
+              contextTokenBudget = INPUT_TOKEN_BUDGET
+              fallbackInProgress = true
+              continue
+            }
+          } catch (fallbackError) {
+            if (controller.signal.aborted) {
+              reply = settleReply(reply, 'stopped', Date.now())
+              break
+            }
+            db.reportStorageError('prepare document fallback')(fallbackError)
+          }
+        }
         // 本地 token 估算无法覆盖文档正文；若上游仍判定超限，减半历史预算重试一次。
-        if (!receivedContent && !contextRetried && isContextTooLongError(error)) {
+        if (
+          !receivedContent &&
+          !contextRetried &&
+          request.question.files.length === 0 &&
+          isContextTooLongError(error)
+        ) {
           contextRetried = true
-          const reportedLimit = contextLimitFromError(error)
-          contextTokenBudget = reportedLimit
-            ? Math.max(1_000, Math.floor(reportedLimit * 0.85))
+          const overflow = contextOverflowFromError(error)
+          contextTokenBudget = overflow
+            ? Math.max(1_000, Math.floor(overflow.maxTokens * 0.85))
             : INPUT_TOO_LONG_RETRY_BUDGET
           continue
         }

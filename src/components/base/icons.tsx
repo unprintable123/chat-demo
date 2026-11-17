@@ -25,6 +25,25 @@ export const IconChevronRightOutline14 = () => (
   </svg>
 )
 
+export const IconContextOutline14 = () => (
+  <svg width={14} height={14} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M12.35 7A5.35 5.35 0 1 1 7 1.65"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+    />
+    <path
+      d="M7 3.45A3.55 3.55 0 1 1 3.45 7"
+      stroke="currentColor"
+      strokeWidth="1.15"
+      strokeLinecap="round"
+      opacity="0.55"
+    />
+    <circle cx="7" cy="7" r="1.35" fill="currentColor" />
+  </svg>
+)
+
 export const IconCloseFill14 = () => (
   <svg width={14} height={14} viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path

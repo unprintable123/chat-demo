@@ -19,6 +19,8 @@ export type FileAttachment = {
   serverId: string | null
   name: string
   size: number
+  /** 归档提供的附件 token 用量；新上传的附件没有该字段。 */
+  tokenUsage?: number
   /** 附件类别；导入时沿用归档的 is_image，不由 MIME 识别结果决定。 */
   isImage: boolean
   /** 具体 MIME；导入时没有原件或无法识别的为空字符串，不影响图片身份。 */
@@ -92,6 +94,12 @@ export type AssistantMessage = MessageBranch & {
   stopDetails?: StopDetails
   /** 最近一次请求的用量，续写后更新 */
   usage?: MessageUsage
+  /** 导入归档中的精确上下文总 token；本地新请求使用 usage + attachmentTokens。 */
+  contextTokens?: number
+  /** 本次请求中附件占用的 token；上游 usage 不包含附件正文时用于展示。 */
+  attachmentTokens?: number
+  /** attachmentTokens 是否已经包含在 usage 的输入 token 中。 */
+  attachmentTokensInUsage?: boolean
   error?: {
     /** upload：发送前补传附件失败，请求没有发出 */
     kind: ApiErrorKind | 'upload'
@@ -104,6 +112,14 @@ export type AssistantMessage = MessageBranch & {
 }
 
 export type Message = UserMessage | AssistantMessage
+
+/** 最近一次请求的 token 拆分；归档只有总计时会缺少输入、输出明细。 */
+export type ContextTokenUsage = {
+  fileTokens: number
+  inputTokens?: number
+  outputTokens?: number
+  totalTokens: number
+}
 
 export type Session = {
   id: string

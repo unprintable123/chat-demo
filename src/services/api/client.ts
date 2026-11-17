@@ -7,6 +7,8 @@ import type {
   FileObject,
   FilePurpose,
   MessageStreamEvent,
+  OcrResult,
+  OcrPurpose,
 } from './types.js'
 
 /** 同源服务端代理地址；API Key 不在浏览器中保存或发送 */
@@ -130,6 +132,39 @@ export const uploadFile = async (
     signal,
   })
   return (await response.json()) as FileObject
+}
+
+/** OCR API 不保存文件，返回逐页文本，用于单次文档上下文超限时的降级处理。 */
+export const recognizeDocument = async (
+  file: File,
+  purpose: OcrPurpose,
+  signal?: AbortSignal
+): Promise<OcrResult> => {
+  const form = new FormData()
+  form.append('purpose', purpose)
+  form.append('file', file)
+  const response = await request(`${API_ORIGIN}/v1/tools/ocr`, {
+    method: 'POST',
+    body: form,
+    signal,
+  })
+  const body = (await response.json()) as OcrResult | ApiErrorBody
+  if (isErrorBody(body)) {
+    throw new ApiError('http', body.error.message, response.status)
+  }
+  if (
+    body?.object !== 'ocr.result' ||
+    !Array.isArray(body.pages) ||
+    body.pages.some(
+      (page) =>
+        typeof page?.text !== 'string' ||
+        typeof page.index !== 'number' ||
+        !['stop', 'length'].includes(page.finish_reason)
+    )
+  ) {
+    throw new ApiError('protocol', 'Invalid OCR response')
+  }
+  return body
 }
 
 /** DELETE /anthropic/v1/files/{file_id} */

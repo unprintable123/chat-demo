@@ -176,6 +176,7 @@ export type CreateMessageRequest = {
   model: ChatModel
   system: string
   messages: MessageParam[]
+  max_tokens?: number
   thinking: { type: 'enabled' | 'disabled' }
   tools: (DeepseekWebSearchTool | DeepseekReadUrlTool)[]
   safety_check: { level: 'high' }
@@ -239,6 +240,8 @@ export type MessageStreamEvent =
  */
 export type FilePurpose = 'rich_layout_recognition' | 'user_data'
 
+export type OcrPurpose = 'text_recognition' | 'rich_layout_recognition'
+
 /** POST /anthropic/v1/files 的响应 */
 export type FileObject = {
   id: string
@@ -247,6 +250,21 @@ export type FileObject = {
   created_at: string
   filename: string
   mime_type: string
+}
+
+export type OcrPage = {
+  index: number
+  text: string
+  finish_reason: 'stop' | 'length'
+}
+
+export type OcrResult = {
+  id: string
+  object: 'ocr.result'
+  created: number
+  purpose: OcrPurpose
+  page_count: number
+  pages: OcrPage[]
 }
 
 /** 非 2xx 响应体；流中出现只含 error 的无名 data 帧时同样按此解析 */
