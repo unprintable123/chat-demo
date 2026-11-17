@@ -45,6 +45,7 @@ const SAFETY_CHECK = { level: 'high' } as const
 const FILE_RETRY_LIMIT = 2
 /** 退避基数，第 n 次重试等待 2^n 倍；连续失败达到上限就放弃，把原始报错展示出来 */
 const FILE_RETRY_BASE_DELAY = 1000
+const INPUT_TOO_LONG_RETRY_BUDGET = 28_000
 
 const isContextTooLongError = (error: unknown) =>
   error instanceof ApiError &&
@@ -52,6 +53,15 @@ const isContextTooLongError = (error: unknown) =>
   /(?:input too long|tokens exceeds max|exceeds (?:the )?maximum context length)/i.test(
     error.message
   )
+
+const contextLimitFromError = (error: unknown) => {
+  if (!(error instanceof ApiError)) {
+    return undefined
+  }
+  const match = /exceeds max\s+(\d+)\s+tokens?/i.exec(error.message)
+  const limit = match ? Number(match[1]) : NaN
+  return Number.isFinite(limit) && limit > 0 ? limit : undefined
+}
 
 /** 阅读链接始终开启，智能搜索开关控制是否另行声明搜索工具（含边想边搜）。 */
 const serverTools = (search: boolean): CreateMessageRequest['tools'] => {
@@ -1059,7 +1069,10 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         // 本地 token 估算无法覆盖文档正文；若上游仍判定超限，减半历史预算重试一次。
         if (!receivedContent && !contextRetried && isContextTooLongError(error)) {
           contextRetried = true
-          contextTokenBudget = Math.floor(contextTokenBudget / 2)
+          const reportedLimit = contextLimitFromError(error)
+          contextTokenBudget = reportedLimit
+            ? Math.max(1_000, Math.floor(reportedLimit * 0.85))
+            : INPUT_TOO_LONG_RETRY_BUDGET
           continue
         }
         // 附件失效：重新补传后重发。收到过内容块（含丢弃的客户端工具）后不自动重发。

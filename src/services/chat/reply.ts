@@ -15,8 +15,8 @@ import type {
   UserMessage,
 } from './types.js'
 
-/** 给 system、工具定义、标题和 tokenizer 估算误差预留空间。 */
-export const INPUT_TOKEN_BUDGET = 28_000
+/** deepseek-flash 的 1M 上下文扣除思考/输出与估算误差后的输入预算。 */
+export const INPUT_TOKEN_BUDGET = 900_000
 /** 历史文档/图片的实际 token 数无法在浏览器中准确计算，按保守值参与预算。 */
 const FILE_CONTEXT_TOKEN_ESTIMATE = 8_192
 
