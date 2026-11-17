@@ -12,7 +12,7 @@ import {
 import type { FileAttachment } from './types.js'
 
 export type DraftAttachment = {
-  /** 本地标识，也是 IndexedDB 原件与上传任务的 key */
+  /** 本地标识，也是服务端原件与上传任务的 key */
   id: string
   file: File
   isImage: boolean
@@ -46,10 +46,9 @@ const updateDraft = (sessionId: string | null, update: (draft: Draft) => Draft) 
 export const setDraftText = (sessionId: string | null, text: string) =>
   updateDraft(sessionId, (draft) => ({ ...draft, text }))
 
-const upload = (attachment: DraftAttachment, apiKey: string) => {
+const upload = (attachment: DraftAttachment) => {
   // 上传任务负责记录错误，输入框的附件卡片展示失败及重试入口。
   void uploadAttachment(
-    apiKey,
     attachment.id,
     attachment.file,
     attachment.file.name,
@@ -60,8 +59,7 @@ const upload = (attachment: DraftAttachment, apiKey: string) => {
 /** 整批校验通过后才创建预览和开始上传。 */
 export const addDraftFiles = (
   sessionId: string | null,
-  files: File[],
-  apiKey: string
+  files: File[]
 ): TranslationMessage | null => {
   if (files.length === 0) {
     return null
@@ -80,18 +78,14 @@ export const addDraftFiles = (
     }
   })
   updateDraft(sessionId, (draft) => ({ ...draft, attachments: [...draft.attachments, ...added] }))
-  added.forEach((attachment) => upload(attachment, apiKey))
+  added.forEach(upload)
   return null
 }
 
-export const retryDraftAttachment = (
-  sessionId: string | null,
-  attachmentId: string,
-  apiKey: string
-) => {
+export const retryDraftAttachment = (sessionId: string | null, attachmentId: string) => {
   const attachment = getDraft(sessionId).attachments.find((item) => item.id === attachmentId)
   if (attachment) {
-    upload(attachment, apiKey)
+    upload(attachment)
   }
 }
 

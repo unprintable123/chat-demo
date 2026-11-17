@@ -2,9 +2,9 @@
 
 [English](README.md) | 简体中文
 
-基于 DeepSeek API 的静态聊天示例。无需应用后端，浏览器直接请求配置的 API 服务。
+基于 DeepSeek API 的服务器聊天应用。浏览器只与同源的 Node.js 服务端通信，服务端把 API Key 和会话历史保存在本仓库内，并代理 DeepSeek 请求。
 
-点击 [在线体验](https://deepseek-ai.github.io/chat-demo/) 即可使用，也可以前往 [Releases](https://github.com/deepseek-ai/deepseek-chat-demo/releases) 下载压缩包，解压后双击 `index.html` 在本地使用，无需安装或构建。首次使用时，请在设置中填写 API Key。
+首次使用时，请在设置中填写 API Key。Key 会写入 `data/config.json`，不会返回浏览器。
 
 ## 运行
 
@@ -17,15 +17,16 @@ pnpm install
 pnpm dev
 ```
 
-打开 http://localhost:8090 。
+打开 http://localhost:8090。开发命令会同时启动前端开发服务器和 API/存储服务。
 
-生成静态产物：
+构建并运行生产服务器：
 
 ```sh
 pnpm build
+pnpm start
 ```
 
-产物位于 `dist/`，可部署到静态服务器，也可直接打开 `dist/index.html`。直接打开时，浏览器和 API 服务需允许 `file://` 页面的存储与跨域请求。
+打开 http://127.0.0.1:8091。只有明确需要从其他机器访问时才设置 `HOST=0.0.0.0`；应用没有内置用户登录鉴权。
 
 ## 功能
 
@@ -37,23 +38,27 @@ pnpm build
 
 ## 数据
 
-API Key 和设置保存在浏览器 localStorage，会话及附件原件保存在 IndexedDB，本地数据按浏览器用户配置和站点源（origin）隔离。发送对话、上传附件和使用语音功能时，相应内容会提交给配置的 API 服务。
+API Key 保存在 `data/config.json`，会话和附件原件保存在 `data/chat/`。运行数据默认就在本仓库内，并已被 Git 忽略。浏览器 localStorage 只保存语言、主题、布局等界面偏好。
 
-设置中的历史导入导出使用 ZIP 格式。导入会在确认并校验成功后替换全部本地会话和附件；导出包含会话与本地可用的图片原件，不包含 API Key、设置或非图片附件原件。格式与保留范围见[历史导入导出](src/services/chat/history/README.md)。
+服务端代理聊天、附件上传、语音识别和语音合成请求时注入 API Key，相应消息和附件内容会通过代理提交给 DeepSeek。首次启动会迁移旧版仅浏览器模式留下的 API Key 和会话，成功后删除浏览器中的旧副本。
 
-设置 → 数据管理 → 删除所有对话，会在确认后清空全部本地会话、附件原件和未发送的草稿，停止正在生成的回复并回到新对话。API Key 和其他设置保留，已上传到 API 服务的文件不受影响。
+设置中的历史导入导出使用 ZIP 格式。导入会在确认并校验成功后替换全部服务端会话和附件；导出包含会话与可用图片原件，不包含 API Key、设置或非图片附件原件。格式与保留范围见[历史导入导出](src/services/chat/history/README.md)。
+
+设置 → 数据管理 → 删除所有对话，会在确认后清空服务端会话、附件原件和未发送的草稿，停止正在生成的回复并回到新对话。API Key 和界面设置保留，已上传到 API 服务的文件不受影响。
 
 ## 开发
 
-| 命令          | 用途                |
-| ------------- | ------------------- |
-| `pnpm dev`    | 启动开发服务器      |
-| `pnpm build`  | 构建到 `dist/`      |
-| `pnpm type`   | TypeScript 类型检查 |
-| `pnpm lint`   | oxlint 检查         |
-| `pnpm format` | oxfmt 格式化        |
+| 命令          | 用途                  |
+| ------------- | --------------------- |
+| `pnpm dev`    | 启动开发服务器        |
+| `pnpm build`  | 构建到 `dist/`        |
+| `pnpm start`  | 启动生产 Web/API 服务 |
+| `pnpm server` | 仅启动 API 服务       |
+| `pnpm type`   | TypeScript 类型检查   |
+| `pnpm lint`   | oxlint 检查           |
+| `pnpm format` | oxfmt 格式化          |
 
-[rspack.config.ts](rspack.config.ts) 默认连接 `https://api.deepseek.com`。`createConfig({ apiOrigin, devServer })` 支持自定义 API 地址和开发服务器代理。
+浏览器默认请求 `/api/deepseek`，由服务端代理到 `https://api.deepseek.com`。服务端支持 `DEEPSEEK_API_ORIGIN`、`DEEPSEEK_API_KEY`、`CHAT_DATA_DIR`、`HOST` 和 `PORT` 环境变量。
 
 聊天默认使用 `deepseek-flash`，通过 Anthropic 兼容的 Messages / Files API 通信；语音使用 ASR / TTS 接口。请求使用搜索、链接阅读、标题和 `latest_reminder` 等扩展，接入服务需支持相应能力。附件实际支持的格式以服务端校验为准。
 
@@ -64,10 +69,12 @@ src/
   i18n/                中英文文案
   services/
     api/               API 请求、SSE 与协议类型
-    chat/              会话、消息分支、本地存储与历史导入导出
+    chat/              会话、消息分支、服务端存储与历史导入导出
     markdown/          Markdown 解析、代码高亮与图表
     speech/            录音与朗读
   utils/               通用工具
+server/                HTTP API、存储与 DeepSeek 代理
+data/                  运行时 API Key、会话与附件（Git 忽略）
 ```
 
 ## 许可证

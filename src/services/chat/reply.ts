@@ -15,6 +15,45 @@ import type {
   UserMessage,
 } from './types.js'
 
+/** 给 system、工具定义、标题和 tokenizer 估算误差预留空间。 */
+export const INPUT_TOKEN_BUDGET = 28_000
+/** 历史文档/图片的实际 token 数无法在浏览器中准确计算，按保守值参与预算。 */
+const FILE_CONTEXT_TOKEN_ESTIMATE = 8_192
+
+const estimateTextTokens = (text: string): number => {
+  let wide = 0
+  let ascii = 0
+  for (const character of text) {
+    if ((character.codePointAt(0) ?? 0) <= 0x7f) {
+      ascii++
+    } else {
+      wide++
+    }
+  }
+  return Math.ceil(wide * 1.5 + ascii / 2.4)
+}
+
+const estimateMessageTokens = (message: MessageParam): number => {
+  const overhead = 8
+  if (typeof message.content === 'string') {
+    return overhead + estimateTextTokens(message.content)
+  }
+  return (
+    overhead +
+    message.content.reduce(
+      (total, block) =>
+        total +
+        (block.type === 'image' || block.type === 'document'
+          ? FILE_CONTEXT_TOKEN_ESTIMATE
+          : estimateTextTokens(JSON.stringify(block))),
+      0
+    )
+  )
+}
+
+const estimateContextTokens = (messages: MessageParam[]): number =>
+  messages.reduce((total, message) => total + estimateMessageTokens(message), 0)
+
 /**
  * 文件按 Files API 的 file_id（附件的 serverId）引用：图片用 image 块，其余用 document 块。
  * 发送前 streamReply 会先补齐 serverId；仍为 null 的是本地没有原件的附件，不进入请求。
@@ -185,8 +224,7 @@ export const canContinueReply = (reply: AssistantMessage): boolean => {
     return false
   }
   return (
-    reply.status === 'stopped' ||
-    (reply.status === 'done' && reply.stopReason === 'max_tokens')
+    reply.status === 'stopped' || (reply.status === 'done' && reply.stopReason === 'max_tokens')
   )
 }
 
@@ -305,27 +343,30 @@ export const toRequestMessages = (
   question: UserMessage,
   prefix?: AssistantMessage,
   thinking = prefix?.thinking ?? false,
-  latestReminder?: string
+  latestReminder?: string,
+  maxTokens = INPUT_TOKEN_BUDGET
 ): MessageParam[] => {
-  const messages: MessageParam[] = []
+  const rounds: { messages: MessageParam[]; reminder?: string }[] = []
   let previousReminder: string | undefined
-  const appendReminder = (reminder: string | undefined) => {
-    // 仅在当前分支首次出现或内容变化时插入快照；缺少快照的消息保持原有内容。
-    if (reminder && reminder !== previousReminder) {
-      messages.push({ role: 'latest_reminder', content: reminder })
-      previousReminder = reminder
-    }
-  }
   for (const [user, reply] of getContextRounds(history)) {
     // 历史提问没有文字、附件也都没有 serverId 时，提问为空，连同回答一起省略。
     if (!user.content && toFileBlocks(user.files).length === 0) {
       continue
     }
-    appendReminder(reply.latestReminder)
+    const messages: MessageParam[] = []
+    // 仅在当前分支首次出现或内容变化时插入快照；缺少快照的消息保持原有内容。
+    if (reply.latestReminder && reply.latestReminder !== previousReminder) {
+      messages.push({ role: 'latest_reminder', content: reply.latestReminder })
+      previousReminder = reply.latestReminder
+    }
     messages.push(toUserParam(user), toAssistantParam(reply))
+    rounds.push({ messages, reminder: reply.latestReminder })
   }
-  appendReminder(latestReminder)
-  messages.push(toUserParam(question))
+  const tail: MessageParam[] = []
+  if (latestReminder) {
+    tail.push({ role: 'latest_reminder', content: latestReminder })
+  }
+  tail.push(toUserParam(question))
   if (prefix?.prefix) {
     const assistant = toAssistantParam(prefix, true, thinking)
     // 没有非空白正文或有效思考时直接重发原问题，避免服务端拒绝空 Prefill。
@@ -336,10 +377,27 @@ export const toRequestMessages = (
           (block.type === 'thinking' && block.thinking.trim())
       )
     ) {
-      messages.push(assistant)
+      tail.push(assistant)
     }
   }
-  return messages
+
+  // 当前问题、时间快照和续写前缀优先保留；历史按时间从新到旧装入剩余预算。
+  let used = estimateContextTokens(tail)
+  const selectedRounds: typeof rounds = []
+  for (let index = rounds.length - 1; index >= 0; index--) {
+    const round = rounds[index]
+    const tokens = estimateContextTokens(round.messages)
+    if (used + tokens > maxTokens) {
+      break
+    }
+    selectedRounds.unshift(round)
+    used += tokens
+  }
+
+  const selectedLastReminder = selectedRounds.at(-1)?.reminder
+  const trimmedTail =
+    latestReminder && latestReminder === selectedLastReminder ? tail.slice(1) : tail
+  return [...selectedRounds.flatMap((round) => round.messages), ...trimmedTail]
 }
 
 /** 思考用时（秒），至少 1 秒 */
