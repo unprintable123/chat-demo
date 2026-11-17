@@ -113,7 +113,7 @@ export type AssistantMessage = MessageBranch & {
 
 export type Message = UserMessage | AssistantMessage
 
-/** 最近一次请求的 token 拆分；归档只有总计时会缺少输入、输出明细。 */
+/** 当前分支的 token 拆分：输入取最新请求，输出累计当前上下文中的各轮回复。 */
 export type ContextTokenUsage = {
   fileTokens: number
   inputTokens?: number

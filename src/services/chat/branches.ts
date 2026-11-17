@@ -55,6 +55,10 @@ export const getCurrentContextUsage = (session: Session): ContextTokenUsage | un
       ...(question?.role === 'user' ? question.files : []),
     ].filter((file) => file.serverId !== null || file.tokenUsage !== undefined)
     const estimatedFileTokens = estimateFileContextTokens(files)
+    const previousOutputTokens = getContextRounds(history).reduce(
+      (total, [, reply]) => total + (reply.usage?.output_tokens ?? 0),
+      0
+    )
     if (message.contextTokens !== undefined) {
       return {
         fileTokens: estimatedFileTokens,
@@ -92,10 +96,8 @@ export const getCurrentContextUsage = (session: Session): ContextTokenUsage | un
       return {
         fileTokens,
         inputTokens,
-        outputTokens: output_tokens,
-        totalTokens: attachmentTokensInUsage
-          ? apiInputTokens + output_tokens
-          : inputTokens + fileTokens + output_tokens,
+        outputTokens: previousOutputTokens + output_tokens,
+        totalTokens: inputTokens + fileTokens + previousOutputTokens + output_tokens,
       }
     }
   }
